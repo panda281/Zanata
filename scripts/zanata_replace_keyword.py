@@ -9,15 +9,28 @@ Targets:
   Document: hellocash
 
 Authentication (required for writes):
-  export ZANATA_USER="your-username"
-  export ZANATA_TOKEN="your-api-key"
+  Linux/macOS:
+    export ZANATA_USER="your-username"
+    export ZANATA_TOKEN="your-api-key"
+
+  Windows (CMD):
+    set ZANATA_USER=your-username
+    set ZANATA_TOKEN=your-api-key
+
+  Windows (PowerShell):
+    $env:ZANATA_USER = "your-username"
+    $env:ZANATA_TOKEN = "your-api-key"
 
 Usage:
-  # Preview matches without changing anything
-  python3 scripts/zanata_replace_keyword.py --find "VitaBirr" --replace "HelloCash" --dry-run
+  Linux/macOS:
+    python3 scripts/zanata_replace_keyword.py --find "HelloCash" --replace "VitaBirr" --dry-run
 
-  # Apply changes
-  python3 scripts/zanata_replace_keyword.py --find "VitaBirr" --replace "HelloCash"
+  Windows (CMD):
+    scripts\zanata_replace_keyword.bat --find "HelloCash" --replace "VitaBirr" --dry-run
+
+  Windows (PowerShell):
+    py scripts\zanata_replace_keyword.py --find "HelloCash" --replace "VitaBirr" --dry-run
+    .\scripts\zanata_replace_keyword.ps1 --find "HelloCash" --replace "VitaBirr" --dry-run
 """
 
 from __future__ import annotations
