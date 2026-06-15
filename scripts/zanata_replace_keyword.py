@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""
-Replace a keyword in the Zanata source document `hellocash`.
+r"""
+Replace a keyword in the Zanata document `hellocash`.
 
 Targets:
   Server:   https://zanata.vitabirr.com/zanata/rest
   Project:  hellocash
   Version:  hellocash_newussdmenu
   Document: hellocash
+
+Use --locale-id to choose which language to edit:
+  en-US  -> English source strings
+  am-ET  -> Amharic translations
 
 Authentication (required for writes):
   Linux/macOS:
@@ -23,14 +27,14 @@ Authentication (required for writes):
 
 Usage:
   Linux/macOS:
-    python3 scripts/zanata_replace_keyword.py --find "HelloCash" --replace "VitaBirr" --dry-run
+    python3 scripts/zanata_replace_keyword.py --locale-id en-US --find "HelloCash" --replace "VitaBirr" --dry-run
+    python3 scripts/zanata_replace_keyword.py --locale-id am-ET --find "HelloCash" --replace "VitaBirr" --dry-run
 
   Windows (CMD):
-    scripts\zanata_replace_keyword.bat --find "HelloCash" --replace "VitaBirr" --dry-run
+    scripts\zanata_replace_keyword.bat --locale-id am-ET --find "HelloCash" --replace "VitaBirr" --dry-run
 
   Windows (PowerShell):
-    py scripts\zanata_replace_keyword.py --find "HelloCash" --replace "VitaBirr" --dry-run
-    .\scripts\zanata_replace_keyword.ps1 --find "HelloCash" --replace "VitaBirr" --dry-run
+    py scripts\zanata_replace_keyword.py --locale-id am-ET --find "HelloCash" --replace "VitaBirr" --dry-run
 """
 
 from __future__ import annotations
@@ -43,22 +47,26 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 
 BASE_URL = "https://zanata.vitabirr.com/zanata/rest"
 PROJECT = "hellocash"
 VERSION = "hellocash_newussdmenu"
 DOC_ID = "hellocash"
+DEFAULT_SOURCE_LOCALE = "en-US"
 
 
 @dataclass
 class Match:
-    text_flow_id: str
+    entry_id: str
     field: str
     index: int
     before: str
     after: str
+
+
+DocumentKind = Literal["source", "translation"]
 
 
 class ZanataClient:
@@ -95,24 +103,45 @@ class ZanataClient:
             payload = exc.read().decode("utf-8", errors="replace")
             return exc.code, payload
 
-    def get_source_document(self) -> dict[str, Any]:
+    def _document_path(self, locale_id: str, *, source_locale: str) -> str:
         encoded_doc_id = urllib.parse.quote(DOC_ID, safe="")
-        path = (
-            f"/projects/p/{PROJECT}/iterations/i/{VERSION}/r/{encoded_doc_id}"
-        )
+        base = f"/projects/p/{PROJECT}/iterations/i/{VERSION}/r/{encoded_doc_id}"
+        if locale_id == source_locale:
+            return base
+        encoded_locale = urllib.parse.quote(locale_id, safe="")
+        return f"{base}/translations/{encoded_locale}"
+
+    def get_source_locale(self) -> str:
+        path = self._document_path(DEFAULT_SOURCE_LOCALE, source_locale=DEFAULT_SOURCE_LOCALE)
         status, payload = self._request("GET", path)
         if status != 200:
             raise RuntimeError(f"GET source document failed ({status}): {payload}")
-        return json.loads(payload)
+        resource = json.loads(payload)
+        return resource.get("lang", DEFAULT_SOURCE_LOCALE)
 
-    def put_source_document(self, resource: dict[str, Any]) -> None:
-        encoded_doc_id = urllib.parse.quote(DOC_ID, safe="")
-        path = (
-            f"/projects/p/{PROJECT}/iterations/i/{VERSION}/r/{encoded_doc_id}"
-        )
+    def get_document(self, locale_id: str, source_locale: str) -> tuple[dict[str, Any], DocumentKind]:
+        path = self._document_path(locale_id, source_locale=source_locale)
+        status, payload = self._request("GET", path)
+        if status != 200:
+            raise RuntimeError(
+                f"GET document for locale {locale_id!r} failed ({status}): {payload}"
+            )
+        resource = json.loads(payload)
+        kind: DocumentKind = "source" if locale_id == source_locale else "translation"
+        return resource, kind
+
+    def put_document(
+        self,
+        resource: dict[str, Any],
+        locale_id: str,
+        source_locale: str,
+    ) -> None:
+        path = self._document_path(locale_id, source_locale=source_locale)
         status, payload = self._request("PUT", path, body=resource)
         if status not in (200, 201, 204):
-            raise RuntimeError(f"PUT source document failed ({status}): {payload}")
+            raise RuntimeError(
+                f"PUT document for locale {locale_id!r} failed ({status}): {payload}"
+            )
 
 
 def replace_in_value(value: str, find: str, replace: str) -> tuple[str, int]:
@@ -122,55 +151,95 @@ def replace_in_value(value: str, find: str, replace: str) -> tuple[str, int]:
     return value.replace(find, replace), count
 
 
+def process_text_items(
+    items: list[dict[str, Any]],
+    *,
+    id_key: str,
+    find: str,
+    replace: str,
+) -> tuple[list[Match], list[dict[str, Any]]]:
+    updated_items = json.loads(json.dumps(items))
+    matches: list[Match] = []
+
+    for item in updated_items:
+        entry_id = item.get(id_key, "<unknown>")
+
+        if "content" in item and isinstance(item["content"], str):
+            new_content, count = replace_in_value(item["content"], find, replace)
+            if count:
+                matches.append(
+                    Match(
+                        entry_id=entry_id,
+                        field="content",
+                        index=0,
+                        before=item["content"],
+                        after=new_content,
+                    )
+                )
+                item["content"] = new_content
+
+        if "contents" in item and isinstance(item["contents"], list):
+            for idx, value in enumerate(item["contents"]):
+                if not isinstance(value, str):
+                    continue
+                new_value, count = replace_in_value(value, find, replace)
+                if count:
+                    matches.append(
+                        Match(
+                            entry_id=entry_id,
+                            field="contents",
+                            index=idx,
+                            before=value,
+                            after=new_value,
+                        )
+                    )
+                    item["contents"][idx] = new_value
+
+    return matches, updated_items
+
+
 def collect_matches(
     resource: dict[str, Any],
+    kind: DocumentKind,
     find: str,
     replace: str,
 ) -> tuple[list[Match], dict[str, Any]]:
     updated = json.loads(json.dumps(resource))
-    matches: list[Match] = []
 
-    for text_flow in updated.get("textFlows", []):
-        flow_id = text_flow.get("id", "<unknown>")
+    if kind == "source":
+        items_key = "textFlows"
+        id_key = "id"
+    else:
+        items_key = "textFlowTargets"
+        id_key = "resId"
 
-        if "content" in text_flow and isinstance(text_flow["content"], str):
-            new_content, count = replace_in_value(text_flow["content"], find, replace)
-            if count:
-                matches.append(
-                    Match(
-                        text_flow_id=flow_id,
-                        field="content",
-                        index=0,
-                        before=text_flow["content"],
-                        after=new_content,
-                    )
-                )
-                text_flow["content"] = new_content
+    items = updated.get(items_key, [])
+    if not isinstance(items, list):
+        raise RuntimeError(f"Unexpected {items_key} format in document response.")
 
-        if "contents" in text_flow and isinstance(text_flow["contents"], list):
-            for idx, item in enumerate(text_flow["contents"]):
-                if not isinstance(item, str):
-                    continue
-                new_item, count = replace_in_value(item, find, replace)
-                if count:
-                    matches.append(
-                        Match(
-                            text_flow_id=flow_id,
-                            field="contents",
-                            index=idx,
-                            before=item,
-                            after=new_item,
-                        )
-                    )
-                    text_flow["contents"][idx] = new_item
-
+    matches, updated_items = process_text_items(
+        items,
+        id_key=id_key,
+        find=find,
+        replace=replace,
+    )
+    updated[items_key] = updated_items
     return matches, updated
 
 
-def print_report(matches: list[Match], find: str, replace: str, dry_run: bool) -> None:
+def print_report(
+    matches: list[Match],
+    *,
+    locale_id: str,
+    kind: DocumentKind,
+    find: str,
+    replace: str,
+    dry_run: bool,
+) -> None:
     print(f"Document: {DOC_ID}")
     print(f"Project:  {PROJECT}")
     print(f"Version:  {VERSION}")
+    print(f"Locale:   {locale_id} ({kind})")
     print(f"Find:     {find!r}")
     print(f"Replace:  {replace!r}")
     print(f"Mode:     {'DRY RUN' if dry_run else 'APPLY'}")
@@ -180,7 +249,8 @@ def print_report(matches: list[Match], find: str, replace: str, dry_run: bool) -
         print("No matches found.")
         return
 
-    print(f"Matches: {len(matches)} text flow(s)")
+    label = "text flow(s)" if kind == "source" else "translation(s)"
+    print(f"Matches: {len(matches)} {label}")
     print("-" * 72)
     for i, match in enumerate(matches, start=1):
         field_label = (
@@ -188,7 +258,7 @@ def print_report(matches: list[Match], find: str, replace: str, dry_run: bool) -
             if match.field == "content"
             else f"{match.field}[{match.index}]"
         )
-        print(f"{i}. textFlow={match.text_flow_id} ({field_label})")
+        print(f"{i}. entry={match.entry_id} ({field_label})")
         print(f"   before: {match.before}")
         print(f"   after:  {match.after}")
         print()
@@ -197,9 +267,17 @@ def print_report(matches: list[Match], find: str, replace: str, dry_run: bool) -
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Search and replace a keyword in the Zanata source document "
-            f"'{DOC_ID}'."
+            "Search and replace a keyword in the Zanata document "
+            f"'{DOC_ID}' for a chosen locale."
         )
+    )
+    parser.add_argument(
+        "--locale-id",
+        required=True,
+        help=(
+            "Locale to edit. Use the source locale for English source strings "
+            "(usually en-US), or a target locale such as am-ET for Amharic translations."
+        ),
     )
     parser.add_argument(
         "--find",
@@ -246,13 +324,26 @@ def main() -> int:
     client = ZanataClient(args.base_url, user, token)
 
     try:
-        resource = client.get_source_document()
+        source_locale = client.get_source_locale()
+        resource, kind = client.get_document(args.locale_id, source_locale)
     except Exception as exc:  # noqa: BLE001 - surface clean CLI error
         print(f"Error fetching document: {exc}", file=sys.stderr)
         return 1
 
-    matches, updated_resource = collect_matches(resource, args.find, args.replace)
-    print_report(matches, args.find, args.replace, args.dry_run)
+    matches, updated_resource = collect_matches(
+        resource,
+        kind,
+        args.find,
+        args.replace,
+    )
+    print_report(
+        matches,
+        locale_id=args.locale_id,
+        kind=kind,
+        find=args.find,
+        replace=args.replace,
+        dry_run=args.dry_run,
+    )
 
     if not matches:
         return 0
@@ -262,7 +353,7 @@ def main() -> int:
         return 0
 
     try:
-        client.put_source_document(updated_resource)
+        client.put_document(updated_resource, args.locale_id, source_locale)
     except Exception as exc:  # noqa: BLE001 - surface clean CLI error
         print(f"Error uploading document: {exc}", file=sys.stderr)
         return 1
